@@ -1038,58 +1038,76 @@ namespace move_base {
         //check to see if we've reached our goal
         if(tc_->isGoalReached()){
           ROS_DEBUG_NAMED("move_base","Goal reached!");
+          // 重置导航状态和清理相关数据
           resetState();
 
           //disable the planner thread
           boost::unique_lock<boost::recursive_mutex> lock(planner_mutex_);
-          runPlanner_ = false;
+          runPlanner_ = false;    // 表示禁用规划器线程
           lock.unlock();
-
+          // 设置Action服务器的目标为"成功"状态，并附带成功消息，表示已达到目
           as_->setSucceeded(move_base_msgs::MoveBaseResult(), "Goal reached.");
           return true;
         }
 
         //check for an oscillation condition
+        // 如果振荡超时值大于零且上次振荡重置的时间加上振荡超时值小于当前时间
         if(oscillation_timeout_ > 0.0 &&
             last_oscillation_reset_ + ros::Duration(oscillation_timeout_) < ros::Time::now())
         {
+          // 向机器人发布零速度指令，即停止机器人的运动
           publishZeroVelocity();
-          state_ = CLEARING;
-          recovery_trigger_ = OSCILLATION_R;
+          state_ = CLEARING;  // 表示机器人将执行障碍物清除
+          recovery_trigger_ = OSCILLATION_R; // 表示此次障碍物清除是由振荡引发的
         }
 
         {
          boost::unique_lock<costmap_2d::Costmap2D::mutex_t> lock(*(controller_costmap_ros_->getCostmap()->getMutex()));
-
+        // 计算机器人的速度指令
         if(tc_->computeVelocityCommands(cmd_vel)){
+          // 表示已从局部规划器获得有效的速度指令，并显示线性和角速度
           ROS_DEBUG_NAMED( "move_base", "Got a valid command from the local planner: %.3lf, %.3lf, %.3lf",
                            cmd_vel.linear.x, cmd_vel.linear.y, cmd_vel.angular.z );
+          // 记录当前时间，以便在检测失控情况时使用
           last_valid_control_ = ros::Time::now();
           //make sure that we send the velocity command to the base
+          // 发布计算得到的速度指令，控制机器人运动
           vel_pub_.publish(cmd_vel);
+          // 如果之前的恢复触发是由控制引起的
           if(recovery_trigger_ == CONTROLLING_R)
+            // 表示已成功控制机器人，不再需要恢复行为
             recovery_index_ = 0;
         }
         else {
+          // 计算出尝试控制的截止时间，即最后一次成功控制时间加上控制耐心时间
           ROS_DEBUG_NAMED("move_base", "The local planner could not find a valid plan.");
           ros::Time attempt_end = last_valid_control_ + ros::Duration(controller_patience_);
 
           //check if we've tried to find a valid control for longer than our time limit
+          // 如果当前时间超过尝试控制的截止时间
           if(ros::Time::now() > attempt_end){
             //we'll move into our obstacle clearing mode
+            // 停止机器人的运动
             publishZeroVelocity();
+            // 表示机器人将执行障碍物清除
             state_ = CLEARING;
+            // 表示此次障碍物清除是由控制引发的
             recovery_trigger_ = CONTROLLING_R;
           }
-          else{
+          else{ // 如果无法找到有效的控制，将返回到规划状态
             //otherwise, if we can't find a valid control, we'll go back to planning
+            // 记录当前时间，以表示上一次成功的规划时间
             last_valid_plan_ = ros::Time::now();
-            planning_retries_ = 0;
+            planning_retries_ = 0; // 将规划重试次数重置为零
+            // 表示机器人将重新尝试规划路径
             state_ = PLANNING;
+            // 发布零速度指令，以停止机器人的运动
             publishZeroVelocity();
 
             //enable the planner thread in case it isn't running on a clock
+            // 启用规划器线程，以防止它没有在计时器上运行
             boost::unique_lock<boost::recursive_mutex> lock(planner_mutex_);
+            // 通过唤醒规划器线程，通知它开始规划
             runPlanner_ = true;
             planner_cond_.notify_one();
             lock.unlock();
@@ -1101,19 +1119,22 @@ namespace move_base {
 
       //we'll try to clear out space with any user-provided recovery behaviors
       case CLEARING:
+        // 表示机器人处于清除/恢复状态
         ROS_DEBUG_NAMED("move_base","In clearing/recovery state");
         //we'll invoke whatever recovery behavior we're currently on if they're enabled
+        // 检查恢复行为是否被启用，并且当前的恢复索引值是否小于恢复行为的数量
         if(recovery_behavior_enabled_ && recovery_index_ < recovery_behaviors_.size()){
+          // 显示正在执行恢复行为的编号和总恢复行为数量
           ROS_DEBUG_NAMED("move_base_recovery","Executing behavior %u of %zu", recovery_index_+1, recovery_behaviors_.size());
-
+          // 包括当前机器人的位置、正在执行的恢复行为编号、总的恢复行为数量以及正在执行的恢复行为名称  
           move_base_msgs::RecoveryStatus msg;
           msg.pose_stamped = current_position;
           msg.current_recovery_number = recovery_index_;
           msg.total_number_of_recoveries = recovery_behaviors_.size();
           msg.recovery_behavior_name =  recovery_behavior_names_[recovery_index_];
-
+          // 发布恢复状态消息到recovery_status_pub_话题，将恢复行为的执行情况传递给外部
           recovery_status_pub_.publish(msg);
-
+          // 执行当前恢复行为的runBehavior()方法，开始执行实际的恢复行为
           recovery_behaviors_[recovery_index_]->runBehavior();
 
           //we at least want to give the robot some time to stop oscillating after executing the behavior
@@ -1158,10 +1179,11 @@ namespace move_base {
         resetState();
         //disable the planner thread
         boost::unique_lock<boost::recursive_mutex> lock(planner_mutex_);
-        runPlanner_ = false;
-        lock.unlock();
+        runPlanner_ = false;    // 将机器人的状态进行重置，以确保不会陷入异常状态
+        lock.unlock();          // 获取互斥锁，将runPlanner_标志设置为false，表示不再运行规划器线程
+        // 向Action服务器发布一个放弃的结果消息，同时提供错误描述信息
         as_->setAborted(move_base_msgs::MoveBaseResult(), "Reached a case that should not be hit in move_base. This is a bug, please report it.");
-        return true;
+        return true;  // 表示恢复行为执行完成
     }
 
     //we aren't done yet
@@ -1169,13 +1191,20 @@ namespace move_base {
   }
 
   bool MoveBase::loadRecoveryBehaviors(ros::NodeHandle node){
+    // 用于存储从ROS参数服务器中获取的恢复行为列表
     XmlRpc::XmlRpcValue behavior_list;
+    // 获取名为"recovery_behaviors"的参数，将其存储在behavior_list中
     if(node.getParam("recovery_behaviors", behavior_list)){
+      // 检查获取的参数是否是一个数组类型
       if(behavior_list.getType() == XmlRpc::XmlRpcValue::TypeArray){
+        // 遍历恢复行为列表中的每个元素
         for(int i = 0; i < behavior_list.size(); ++i){
+          // 检查当前结构体是否包含"name"和"type"字段，用于指定恢复行为的名称和类型
           if(behavior_list[i].getType() == XmlRpc::XmlRpcValue::TypeStruct){
+            // 遍历恢复行为列表，以检查是否有重复的名称
             if(behavior_list[i].hasMember("name") && behavior_list[i].hasMember("type")){
               //check for recovery behaviors with the same name
+              // 检查从下一个元素开始，是否存在与当前元素相同的名称和类型
               for(int j = i + 1; j < behavior_list.size(); j++){
                 if(behavior_list[j].getType() == XmlRpc::XmlRpcValue::TypeStruct){
                   if(behavior_list[j].hasMember("name") && behavior_list[j].hasMember("type")){
@@ -1184,6 +1213,7 @@ namespace move_base {
                     if(name_i == name_j){
                       ROS_ERROR("A recovery behavior with the name %s already exists, this is not allowed. Using the default recovery behaviors instead.",
                           name_i.c_str());
+                      // 如果发现具有相同名称的恢复行为，发出错误消息，并返回false，表示加载失败
                       return false;
                     }
                   }
@@ -1203,14 +1233,22 @@ namespace move_base {
         }
 
         //if we've made it to this point, we know that the list is legal so we'll create all the recovery behaviors
+        // 遍历恢复行为列表中的每个恢复行为配置
         for(int i = 0; i < behavior_list.size(); ++i){
           try{
             //check if a non fully qualified name has potentially been passed in
+            // 检查指定的恢复行为类型是否在加载的恢复行为库中可用
             if(!recovery_loader_.isClassAvailable(behavior_list[i]["type"])){
+              // 用于加载恢复行为插件
               std::vector<std::string> classes = recovery_loader_.getDeclaredClasses();
+              // 如果恢复行为类型不在插件库中，说明可能传递了一个非全限定名的类型，这可能是因为之前使用了一个不推荐的API。接下来，代码会尝试查找匹配的类名
               for(unsigned int i = 0; i < classes.size(); ++i){
+                // 获取所有已声明的恢复行为类名
                 if(behavior_list[i]["type"] == recovery_loader_.getName(classes[i])){
                   //if we've found a match... we'll get the fully qualified name and break out of the loop
+                  // 检查当前恢复行为的类型是否与已声明的恢复行为类名匹配。
+                  // 如果找到匹配的类名，说明可能存在使用了不推荐的API的情况，发出警告消息，
+                  // 并将恢复行为的类型更改为完全限定的类名，以适应新的API
                   ROS_WARN("Recovery behavior specifications should now include the package name. You are using a deprecated API. Please switch from %s to %s in your yaml file.",
                       std::string(behavior_list[i]["type"]).c_str(), classes[i].c_str());
                   behavior_list[i]["type"] = classes[i];
@@ -1222,14 +1260,19 @@ namespace move_base {
             boost::shared_ptr<nav_core::RecoveryBehavior> behavior(recovery_loader_.createInstance(behavior_list[i]["type"]));
 
             //shouldn't be possible, but it won't hurt to check
+            // 检查通过类加载器实例化的恢复行为是否为空指针。如果为空，说明存在问题，因为类加载器不应该返回空指针
             if(behavior.get() == NULL){
               ROS_ERROR("The ClassLoader returned a null pointer without throwing an exception. This should not happen");
               return false;
             }
 
             //initialize the recovery behavior with its name
+            // 调用恢复行为的 initialize 方法，将恢复行为的名称、tf 转换接口以及规划器和控制器的代价图传递给恢复行为
+            // 这里使用 tf_ 来进行坐标变换，以便在恢复行为中可能需要转换坐标
             behavior->initialize(behavior_list[i]["name"], &tf_, planner_costmap_ros_, controller_costmap_ros_);
+            // 将当前恢复行为的名称添加到 recovery_behavior_names_ 向量中，以便稍后发布恢复状态消息时使用
             recovery_behavior_names_.push_back(behavior_list[i]["name"]);
+            // 将实例化并初始化的恢复行为对象添加到 recovery_behaviors_ 向量中
             recovery_behaviors_.push_back(behavior);
           }
           catch(pluginlib::PluginlibException& ex){
@@ -1254,37 +1297,54 @@ namespace move_base {
   }
 
   //we'll load our default recovery behaviors here
+  // 加载默认的恢复行为。这些恢复行为在遇到困难时可以用来尝试解决问题
   void MoveBase::loadDefaultRecoveryBehaviors(){
+    // 清空 recovery_behaviors_ 向量，以确保不会叠加默认恢复行为
     recovery_behaviors_.clear();
     try{
       //we need to set some parameters based on what's been passed in to us to maintain backwards compatibility
       ros::NodeHandle n("~");
+      // 根据已传递的参数来设置保守重置恢复行为的距离阈值
       n.setParam("conservative_reset/reset_distance", conservative_reset_dist_);
+      // 将重置恢复行为的距离阈值设置为机器人的外接圆直径的四倍。这是一个相对较大的距离，用于采取更激进的恢复行为
       n.setParam("aggressive_reset/reset_distance", circumscribed_radius_ * 4);
 
       //first, we'll load a recovery behavior to clear the costmap
+      // 使用类加载器创建 clear_costmap_recovery 恢复行为的实例。这个恢复行为用于清除代价图，以尝试摆脱障碍物
       boost::shared_ptr<nav_core::RecoveryBehavior> cons_clear(recovery_loader_.createInstance("clear_costmap_recovery/ClearCostmapRecovery"));
+      // 使用恢复行为实例的 initialize 方法初始化恢复行为，传递相应的参数
       cons_clear->initialize("conservative_reset", &tf_, planner_costmap_ros_, controller_costmap_ros_);
+      // 将恢复行为名称添加到 recovery_behavior_names_ 向量中
       recovery_behavior_names_.push_back("conservative_reset");
+      // 将初始化后的恢复行为实例添加到 recovery_behaviors_ 向量中
       recovery_behaviors_.push_back(cons_clear);
 
       //next, we'll load a recovery behavior to rotate in place
+      // 创建 rotate_recovery 恢复行为的实例。这个恢复行为用于在原地旋转，以尝试找到有效路径
       boost::shared_ptr<nav_core::RecoveryBehavior> rotate(recovery_loader_.createInstance("rotate_recovery/RotateRecovery"));
-      if(clearing_rotation_allowed_){
+      if(clearing_rotation_allowed_){ // 检查是否允许使用旋转恢复行为
         rotate->initialize("rotate_recovery", &tf_, planner_costmap_ros_, controller_costmap_ros_);
+        // 将旋转恢复行为的名称添加到 recovery_behavior_names_ 向量中
         recovery_behavior_names_.push_back("rotate_recovery");
+        // 将初始化后的旋转恢复行为实例添加到 recovery_behaviors_ 向量中
         recovery_behaviors_.push_back(rotate);
       }
 
       //next, we'll load a recovery behavior that will do an aggressive reset of the costmap
+      // 恢复行为将用于更激进的清除代价图，以尝试从困境中脱离
       boost::shared_ptr<nav_core::RecoveryBehavior> ags_clear(recovery_loader_.createInstance("clear_costmap_recovery/ClearCostmapRecovery"));
+      // 使用恢复行为实例的 initialize 方法初始化更激进的清除代价图恢复行为，传递相应的参数
       ags_clear->initialize("aggressive_reset", &tf_, planner_costmap_ros_, controller_costmap_ros_);
+      // 将更激进的清除代价图恢复行为的名称添加到 recovery_behavior_names_ 向量中
       recovery_behavior_names_.push_back("aggressive_reset");
+      // 将初始化后的更激进的清除代价图恢复行为实例添加到 recovery_behaviors_ 向量中
       recovery_behaviors_.push_back(ags_clear);
 
       //we'll rotate in-place one more time
       if(clearing_rotation_allowed_){
+        // 如果允许使用旋转恢复行为，则将旋转恢复行为实例添加到 recovery_behaviors_ 向量中
         recovery_behaviors_.push_back(rotate);
+        // 将旋转恢复行为的名称添加到 recovery_behavior_names_ 向量中
         recovery_behavior_names_.push_back("rotate_recovery");
       }
     }
@@ -1317,44 +1377,60 @@ namespace move_base {
 
   bool MoveBase::getRobotPose(geometry_msgs::PoseStamped& global_pose, costmap_2d::Costmap2DROS* costmap)
   {
+    // 将单位变换矩阵的姿态部分转换为 geometry_msgs::Pose 格式，并赋值给全局姿态 global_pose。
+    // 初始时，全局姿态被设置为单位变换，表示机器人在全局坐标系中的初始位置
     tf2::toMsg(tf2::Transform::getIdentity(), global_pose.pose);
-    geometry_msgs::PoseStamped robot_pose;
+    geometry_msgs::PoseStamped robot_pose;  // 存储机器人的姿态信息
+    // 将单位变换矩阵的姿态部分转换为 geometry_msgs::Pose 格式，并赋值给 robot_pose 的姿态部分
     tf2::toMsg(tf2::Transform::getIdentity(), robot_pose.pose);
+    // 表示机器人姿态的坐标系
     robot_pose.header.frame_id = robot_base_frame_;
+    // 将时间戳设置为当前时间，表示机器人姿态的时间
     robot_pose.header.stamp = ros::Time(); // latest available
+    // 获取当前时间，用于后续检查 tf 时延
     ros::Time current_time = ros::Time::now();  // save time for checking tf delay later
 
     // get robot pose on the given costmap frame
     try
     {
+      // 使用 tf_ 的 transform 函数将 robot_pose 从机器人坐标系转换到全局坐标系，
+      // 并将结果存储在 global_pose 中。costmap->getGlobalFrameID() 获取了全局坐标系的 ID
       tf_.transform(robot_pose, global_pose, costmap->getGlobalFrameID());
     }
     catch (tf2::LookupException& ex)
     {
+      // 如果在 tf 查找转换过程中出现了查找异常，将捕获 tf2::LookupException 类型的异常，并进行处理
       ROS_ERROR_THROTTLE(1.0, "No Transform available Error looking up robot pose: %s\n", ex.what());
       return false;
     }
     catch (tf2::ConnectivityException& ex)
     {
+      // 如果在 tf 转换过程中出现了连接异常，将捕获 tf2::ConnectivityException 类型的异常，并进行处理
       ROS_ERROR_THROTTLE(1.0, "Connectivity Error looking up robot pose: %s\n", ex.what());
       return false;
     }
     catch (tf2::ExtrapolationException& ex)
     {
+      // 如果在 tf 转换过程中出现了外推异常，将捕获 tf2::ExtrapolationException 类型的异常，并进行处理
       ROS_ERROR_THROTTLE(1.0, "Extrapolation Error looking up robot pose: %s\n", ex.what());
       return false;
     }
 
     // check if global_pose time stamp is within costmap transform tolerance
+    // 检查 global_pose 的时间戳是否不为零，以确保已经成功获取了机器人在全局坐标系中的姿态信息。
+    // 如果时间戳为零，说明尚未获取有效的姿态信息，这种情况下不需要进行时间戳检查
     if (!global_pose.header.stamp.isZero() &&
         current_time.toSec() - global_pose.header.stamp.toSec() > costmap->getTransformTolerance())
     {
+      // 这个条件检查当前时间与姿态信息的时间戳之间的差值是否超过了预定义的容忍时间。
+      // current_time.toSec() 返回当前时间的秒数表示，而 global_pose.header.stamp.toSec() 返回姿态信息的时间戳的秒数表示
       ROS_WARN_THROTTLE(1.0, "Transform timeout for %s. " \
                         "Current time: %.4f, pose stamp: %.4f, tolerance: %.4f", costmap->getName().c_str(),
                         current_time.toSec(), global_pose.header.stamp.toSec(), costmap->getTransformTolerance());
+      // 返回 false，表示获取机器人姿态失败，可能是因为时间戳超时
       return false;
     }
-
+    // 如果时间戳在容忍时间内，返回 true，表示获取机器人姿态成功且时间戳有效
     return true;
   }
 };
